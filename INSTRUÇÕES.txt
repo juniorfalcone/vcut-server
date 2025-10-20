@@ -1,0 +1,7 @@
+INSTRUÇÕES 
+
+1-Inicializar o Node.js no projeto: 
+ npm init -y
+ 
+2- Instalar as dependências do ffmpeg.wasm:
+npm install @ffmpeg/ffmpeg@0.12.10 @ffmpeg/core@0.12.10

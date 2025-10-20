@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auto-Cut Web (ffmpeg.wasm) Local</title>
+    
+    <script src="./public/ffmpeg.min.js"></script>
+    
+    <style>
+        body { font-family: sans-serif; padding: 20px; background-color: #f4f4f4; }
+        .container { max-width: 800px; margin: 0 auto; background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        input[type="file"], button { padding: 10px; margin-top: 10px; border-radius: 4px; border: 1px solid #ccc; }
+        button { background-color: #007bff; color: white; cursor: pointer; border: none; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        #log { margin-top: 20px; padding: 10px; background-color: #eee; border-radius: 4px; white-space: pre-wrap; height: 150px; overflow-y: scroll; border: 1px solid #ddd; }
+        #output-video { margin-top: 20px; max-width: 100%; display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>✂️ Auto-Cut de Silêncios (Local)</h1>
+        <p>Aplicações WebAssembly com FFmpeg. Processamento no navegador.</p>
+
+        <input type="file" id="file-input" accept="video/*">
+        <button id="process-button" onclick="processVideo()" disabled>Processar Vídeo</button>
+        
+        <h2>Status e Log:</h2>
+        <div id="log">Aguardando inicialização do FFmpeg...</div>
+
+        <h2>Vídeo de Saída:</h2>
+        <video id="output-video" controls></video>
+        <a id="download-link" download="video-sem-silencio.mp4" style="display: none; margin-top: 10px;">Baixar Vídeo</a>
+    </div>
+
+    <script>
+        const { createFFmpeg, fetchFile } = FFmpeg;
+
+        // --- CORREÇÃO DE PATH PARA SERVIDOR PYTHON (COOP/COEP) ---
+        // Essencial para o carregamento do Web Worker e SharedArrayBuffer
+        const CORE_FILE_NAME = 'ffmpeg-core.js';
+        const CORE_PATH = new URL('/public/' + CORE_FILE_NAME, document.location.origin).href; 
+        // ---------------------------------------------------------
+
+        const ffmpeg = createFFmpeg({
+            log: true,
+            corePath: CORE_PATH 
+        });
+
+        const logElement = document.getElementById('log');
+        const fileInput = document.getElementById('file-input');
+        const processButton = document.getElementById('process-button');
+        const outputVideo = document.getElementById('output-video');
+        const downloadLink = document.getElementById('download-link');
+        
+        // --- Funções de Log e Inicialização (Sem Alteração na Lógica) ---
+        function customLog(message) {
+            console.log(message);
+            logElement.innerHTML += message + '\n';
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+
+        async function loadFFmpeg() {
+            customLog('Iniciando o carregamento LOCAL do FFmpeg Core...');
+            try {
+                ffmpeg.setLogger(({ message }) => {
+                    customLog(`[FFmpeg] ${message}`);
+                });
+                
+                await ffmpeg.load();
+                customLog('✅ FFmpeg Core carregado localmente com sucesso! SharedArrayBuffer Habilitado.');
+                fileInput.disabled = false;
+                
+            } catch (error) {
+                customLog(`❌ Erro ao carregar FFmpeg: ${error.message}.`);
+                customLog(`Aviso: Se você está no celular, verifique se o 'server.py' (com COOP/COEP) está rodando.`);
+                console.error("Erro no carregamento do FFmpeg:", error);
+            }
+        }
+
+        loadFFmpeg();
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0 && ffmpeg.isLoaded()) {
+                processButton.disabled = false;
+            } else {
+                processButton.disabled = true;
+            }
+            outputVideo.style.display = 'none';
+            downloadLink.style.display = 'none';
+            logElement.innerHTML = '';
+            customLog('Arquivo selecionado. Pronto para processar.');
+        });
+
+        // --- LÓGICA DE PROCESSAMENTO (Mantida do arquivo original) ---
+        async function processVideo() {
+            const file = fileInput.files[0];
+            if (!file) {
+                customLog('Selecione um arquivo de vídeo primeiro.');
+                return;
+            }
+
+            processButton.disabled = true;
+            outputVideo.style.display = 'none';
+            downloadLink.style.display = 'none';
+            customLog('Iniciando processamento...');
+
+            const inputFileName = 'input.mp4';
+            const outputFileName = 'output.mp4';
+            
+            try {
+                customLog(`Gravando o arquivo "${inputFileName}"...`);
+                await ffmpeg.FS('writeFile', inputFileName, await fetchFile(file));
+                
+                customLog('Executando o comando silencedetect...');
+                await ffmpeg.run(
+                    '-i', inputFileName,
+                    '-af', 'silencedetect=n=-30dB:d=1.5',
+                    '-f', 'null',
+                    '-' 
+                );
+                
+                const fullLog = logElement.innerText;
+                const timestamps = extractTimestamps(fullLog);
+                
+                if (timestamps.length === 0) {
+                    customLog('⚠️ Nenhum silêncio significativo detectado.');
+                    processButton.disabled = false;
+                    return;
+                }
+                
+                customLog(`✅ Silêncios detectados.`);
+
+                const segmentsToKeep = calculateKeepSegments(timestamps);
+                
+                if (segmentsToKeep.length === 0) {
+                    customLog('⚠️ Nenhuma parte de conteúdo para manter.');
+                    processButton.disabled = false;
+                    return;
+                }
+                customLog(`Total de clipes de conteúdo a manter: ${segmentsToKeep.length}`);
+
+
+                const cutFileNames = [];
+                for (let i = 0; i < segmentsToKeep.length; i++) {
+                    const { start, end } = segmentsToKeep[i];
+                    const duration = (parseFloat(end) - parseFloat(start)).toFixed(3);
+                    const clipName = `clip_${i}.mp4`;
+                    cutFileNames.push(clipName);
+
+                    customLog(`Cortando Clip ${i + 1}: Start=${start}s`);
+
+                    await ffmpeg.run(
+                        '-ss', start.toString(),
+                        '-i', inputFileName,
+                        '-t', duration,
+                        '-c', 'copy', 
+                        clipName
+                    );
+                }
+
+                const concatList = cutFileNames.map(name => `file '${name}'`).join('\n');
+                await ffmpeg.FS('writeFile', 'concat.txt', concatList);
+                
+                customLog('Concatenando clipes...');
+                await ffmpeg.run(
+                    '-f', 'concat',
+                    '-safe', '0',
+                    '-i', 'concat.txt',
+                    '-c', 'copy',
+                    outputFileName
+                );
+                
+                customLog('Leitura do vídeo finalizado...');
+                const data = ffmpeg.FS('readFile', outputFileName);
+
+                const videoBlob = new Blob([data.buffer], { type: 'video/mp4' });
+                const videoURL = URL.createObjectURL(videoBlob);
+                
+                outputVideo.src = videoURL;
+                outputVideo.style.display = 'block';
+                downloadLink.href = videoURL;
+                downloadLink.style.display = 'block';
+                
+                customLog('🎉 Processamento concluído!');
+                
+            } catch (error) {
+                customLog(`❌ Ocorreu um erro no processamento: ${error.message}`);
+                console.error("Erro no processamento:", error);
+            } finally {
+                // Limpeza
+                try {
+                    if (ffmpeg.isLoaded()) {
+                        // Deleta todos os arquivos temporários, incluindo os clipes
+                        const files = ffmpeg.FS('readdir', '/').filter(f => f !== '.' && f !== '..');
+                        files.forEach(f => ffmpeg.FS('unlink', f));
+                    }
+                } catch(e) {}
+                
+                processButton.disabled = false;
+            }
+        }
+        
+        // --- FUNÇÕES DE PARSE DO LOG E CÁLCULO DE SEGMENTOS (Mantidas) ---
+        function extractTimestamps(logText) {
+            const timestamps = [];
+            const regex = /silence_start: (\d+\.?\d*)|silence_end: (\d+\.?\d*)/g;
+            let match;
+            
+            while ((match = regex.exec(logText)) !== null) {
+                if (match[1]) {
+                    timestamps.push({ type: 'start', time: parseFloat(match[1]) });
+                } else if (match[2]) {
+                    timestamps.push({ type: 'end', time: parseFloat(match[2]) });
+                }
+            }
+            return timestamps;
+        }
+
+        function calculateKeepSegments(silenceTimestamps) {
+            const segments = [];
+            let lastEndTime = 0;
+            let finalVideoDuration = 0;
+
+            const durationMatch = logElement.innerText.match(/Duration: (\d{2}:\d{2}:\d{2}\.\d{2})/);
+            if (durationMatch) {
+                const parts = durationMatch[1].split(':').map(p => parseFloat(p));
+                finalVideoDuration = parts[0] * 3600 + parts[1] * 60 + parts[2];
+            }
+
+            for (let i = 0; i < silenceTimestamps.length; i++) {
+                const current = silenceTimestamps[i];
+                
+                if (current.type === 'start') {
+                    const startTime = lastEndTime;
+                    const endTime = current.time;
+                    
+                    if (endTime > startTime + 0.1) {
+                        segments.push({ start: startTime.toFixed(3), end: endTime.toFixed(3) });
+                    }
+                } else if (current.type === 'end') {
+                    lastEndTime = current.time;
+                }
+            }
+
+            if (lastEndTime > 0) {
+                const finalEnd = finalVideoDuration > lastEndTime + 0.5 ? finalVideoDuration : lastEndTime + 500; 
+                if (finalEnd > lastEndTime + 0.1) {
+                    segments.push({ start: lastEndTime.toFixed(3), end: finalEnd.toFixed(3) });
+                }
+            } else if (finalVideoDuration > 0) {
+                 segments.push({ start: 0, end: finalVideoDuration.toFixed(3) });
+            }
+            
+            return segments;
+        }
+
+    </script>
+</body>
+</html>

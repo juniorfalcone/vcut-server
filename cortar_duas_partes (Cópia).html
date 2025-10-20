@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cortar Vídeo em Duas Partes (Local)</title>
+    
+    <script src="./public/ffmpeg.min.js"></script>
+    
+    <style>
+        body { font-family: sans-serif; padding: 20px; background-color: #f4f4f4; }
+        .container { max-width: 800px; margin: 0 auto; background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        input[type="file"], input[type="number"], button { padding: 10px; margin-top: 10px; border-radius: 4px; border: 1px solid #ccc; width: 100%; box-sizing: border-box; }
+        button { background-color: #28a745; color: white; cursor: pointer; border: none; margin-top: 20px; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        #log { margin-top: 20px; padding: 10px; background-color: #eee; border-radius: 4px; white-space: pre-wrap; height: 150px; overflow-y: scroll; border: 1px solid #ddd; }
+        .output-section a { display: block; margin-top: 10px; padding: 10px; background-color: #007bff; color: white; text-align: center; text-decoration: none; border-radius: 4px; }
+        .output-section a:hover { background-color: #0056b3; }
+        .output-section a:empty { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>✂️ Cortar em Duas Partes</h1>
+        <p>Divide o vídeo em dois clipes no ponto de corte especificado e fornece o download de ambos.</p>
+
+        <input type="file" id="file-input" accept="video/*">
+
+        <label for="cut-time">Tempo de Corte (em segundos):</label>
+        <input type="number" id="cut-time" value="5.0" step="0.1" min="0.1" disabled>
+
+        <button id="process-button" onclick="splitVideo()" disabled>Dividir Vídeo</button>
+        
+        <h2>Status e Log:</h2>
+        <div id="log">Aguardando inicialização do FFmpeg...</div>
+
+        <h2>Downloads:</h2>
+        <div class="output-section">
+            <a id="download-part1" download="parte_1.mp4" style="display: none;">Baixar Parte 1</a>
+            <a id="download-part2" download="parte_2.mp4" style="display: none;">Baixar Parte 2</a>
+        </div>
+    </div>
+
+    <script>
+        // Variáveis e Configuração do FFmpeg (Reutilizando a correção do caminho absoluto)
+        const { createFFmpeg, fetchFile } = FFmpeg;
+
+        // --- CORREÇÃO DO CAMINHO ABSOLUTO PARA O CORE ---
+        const CORE_FILE_NAME = 'ffmpeg-core.js';
+        const CORE_PATH = new URL('./public/' + CORE_FILE_NAME, document.location).href;
+        // ------------------------------------------------
+
+        const ffmpeg = createFFmpeg({
+            log: true, 
+            corePath: CORE_PATH 
+        });
+
+        const logElement = document.getElementById('log');
+        const fileInput = document.getElementById('file-input');
+        const cutTimeInput = document.getElementById('cut-time');
+        const processButton = document.getElementById('process-button');
+        const downloadPart1Link = document.getElementById('download-part1');
+        const downloadPart2Link = document.getElementById('download-part2');
+        
+        // Função de Log
+        function customLog(message) {
+            console.log(message);
+            logElement.innerHTML += message + '\n';
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+
+        // ----------------------------------------------------
+        // 1. INICIALIZAÇÃO DA BIBLIOTECA
+        // ----------------------------------------------------
+        async function loadFFmpeg() {
+            customLog('Iniciando o carregamento LOCAL do FFmpeg Core...');
+            try {
+                ffmpeg.setLogger(({ message }) => {
+                    customLog(`[FFmpeg] ${message}`);
+                });
+                
+                await ffmpeg.load();
+                customLog('✅ FFmpeg Core carregado localmente com sucesso!');
+                fileInput.disabled = false;
+                cutTimeInput.disabled = false;
+                
+            } catch (error) {
+                customLog(`❌ Erro ao carregar FFmpeg: ${error.message}. Verifique a pasta 'public/' e o servidor local.`);
+            }
+        }
+
+        loadFFmpeg();
+
+        // Ativa o botão quando um arquivo é selecionado
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0 && ffmpeg.isLoaded()) {
+                processButton.disabled = false;
+            } else {
+                processButton.disabled = true;
+            }
+            downloadPart1Link.style.display = 'none';
+            downloadPart2Link.style.display = 'none';
+            logElement.innerHTML = '';
+            customLog('Arquivo selecionado.');
+        });
+
+
+        // ----------------------------------------------------
+        // 2. LÓGICA DE CORTE PRINCIPAL
+        // ----------------------------------------------------
+        async function splitVideo() {
+            const file = fileInput.files[0];
+            const cutTime = parseFloat(cutTimeInput.value);
+
+            if (!file || isNaN(cutTime) || cutTime <= 0) {
+                customLog('Selecione um arquivo e forneça um tempo de corte válido.');
+                return;
+            }
+
+            processButton.disabled = true;
+            downloadPart1Link.style.display = 'none';
+            downloadPart2Link.style.display = 'none';
+            customLog(`Iniciando corte no tempo: ${cutTime}s...`);
+
+            const inputFileName = 'input.mp4';
+            const output1Name = 'parte_1.mp4';
+            const output2Name = 'parte_2.mp4';
+
+            try {
+                // 1. Escrever o arquivo de entrada
+                customLog('Gravando o arquivo de entrada...');
+                await ffmpeg.FS('writeFile', inputFileName, await fetchFile(file));
+
+                // 2. CORTAR PARTE 1: Do início (0) até o tempo de corte (-t [duração])
+                customLog(`Cortando Parte 1 (0s até ${cutTime}s)...`);
+                await ffmpeg.run(
+                    '-i', inputFileName,
+                    '-t', cutTime.toString(), // -t define a DURAÇÃO a partir do início
+                    '-c', 'copy', // Cópia direta para velocidade
+                    output1Name
+                );
+                
+                // 3. CORTAR PARTE 2: Do tempo de corte (-ss) até o fim
+                customLog(`Cortando Parte 2 (${cutTime}s até o fim)...`);
+                await ffmpeg.run(
+                    '-ss', cutTime.toString(), // -ss define o ponto de START (busca rápida)
+                    '-i', inputFileName,
+                    '-c', 'copy', 
+                    output2Name
+                );
+                
+                // 4. Ler e criar BLOBs para download
+                
+                // Parte 1
+                const data1 = ffmpeg.FS('readFile', output1Name);
+                const blob1 = new Blob([data1.buffer], { type: 'video/mp4' });
+                const url1 = URL.createObjectURL(blob1);
+                downloadPart1Link.href = url1;
+                downloadPart1Link.style.display = 'block';
+
+                // Parte 2
+                const data2 = ffmpeg.FS('readFile', output2Name);
+                const blob2 = new Blob([data2.buffer], { type: 'video/mp4' });
+                const url2 = URL.createObjectURL(blob2);
+                downloadPart2Link.href = url2;
+                downloadPart2Link.style.display = 'block';
+                
+                customLog('🎉 Cortes concluídos! Links de download disponíveis.');
+
+            } catch (error) {
+                customLog(`❌ Ocorreu um erro no processamento: ${error.message}`);
+                console.error("Erro no processamento:", error);
+            } finally {
+                // 5. Limpeza
+                try {
+                    if (ffmpeg.isLoaded()) {
+                        ffmpeg.FS('unlink', inputFileName);
+                        ffmpeg.FS('unlink', output1Name);
+                        ffmpeg.FS('unlink', output2Name);
+                    }
+                } catch(e) {}
+                
+                processButton.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
